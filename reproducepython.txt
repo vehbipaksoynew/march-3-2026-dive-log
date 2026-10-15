@@ -1,0 +1,54 @@
+"""Reproduce the Gazette scuba memory calculation from anonymised depth samples.
+
+Run: python reproduce_memory_example.py
+Dependencies: numpy, scipy (and matplotlib for the optional illustration).
+No identifying information from the original dive computer export is used.
+"""
+from pathlib import Path
+import csv
+import numpy as np
+from scipy.optimize import minimize_scalar
+
+ROOT = Path(__file__).resolve().parent
+with (ROOT / 'anonymised_depth_samples.csv').open(newline='') as file:
+    rows = list(csv.DictReader(file))
+t = np.array([float(r['elapsed_minutes']) for r in rows])
+depth = np.array([float(r['depth_metres']) for r in rows])
+D = 55 + 40/60
+s = 104.
+c = np.log(2.)
+
+
+def loading(half_times):
+    """Exact integration of the linear-response ODE on each linear depth segment."""
+    H = np.atleast_1d(np.array(half_times,dtype=float))
+    k = c / H
+    excess = np.zeros_like(H)
+    for dt, d0, d1 in zip(np.diff(t), depth[:-1], depth[1:]):
+        z = k * dt
+        a = np.exp(-z)
+        h0, h1 = 0.079*d0, 0.079*d1
+        # Integrate h(v)=h0 + (h1-h0) v/dt against k e^{-k(dt-v)}.
+        excess = (a*excess + h0 * (-np.expm1(-z))
+                  + (h1-h0) * (1 + np.expm1(-z) / z))
+    return excess
+
+
+def residual(half_times, surface=s):
+    H = np.atleast_1d(np.array(half_times,dtype=float))
+    return loading(H)*np.exp(-c*surface/H)
+
+nodes = np.array([5, 8, 12.5, 18.5, 27, 38.3, 54.3, 77,
+                  109, 146, 187, 239, 305, 390, 498, 635], dtype=float)
+opt = minimize_scalar(lambda H: -float(residual([H])[0]),
+                      bounds=(10, 600), method='bounded',
+                      options={'xatol': 1e-9})
+print(f'First dive duration: {D:.4f} min, number of time/depth points: {len(t)}')
+print(f'Continuous peak half-time: {opt.x:.6f} min')
+print(f'Maximum residual excess: {-opt.fun:.8f} bar')
+print('Selected discrete residual excesses (mbar):')
+for H in [54.3, 77, 109, 146]:
+    print(f'  {H:5.1f} min: {1000*residual([H])[0]:.5f} mbar')
+print(f'Constant-exposure prediction: {D*c/np.log1p(D/s):.6f} min')
+print(f'General interval: [{c*s:.4f}, {c*(s+D):.4f}] min')
+print('Sanity check maximum of 16 discrete nodes:',nodes[np.argmax(residual(nodes))])
